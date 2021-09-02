@@ -7,9 +7,11 @@ import utime
 
 
 count =0
-diff = lambda i: ("+" if i > 0 else "") + str(round(i,1))
-v0 = PWM(Pin(28))
+diff = lambda i,j: ("+ " if i-j >= 0 else "- ") + str(abs(round(i-j,2)))
 
+
+#set PWM for contrast and led brightness settings
+v0 = PWM(Pin(28))
 v0.freq(10000)
 v0.duty_u16(20000)
 
@@ -19,7 +21,7 @@ a.duty_u16(65025)
 
 
 
-#i2c = I2C(0, sda = Pin(16), scl = Pin(17), freq = 400000)
+i2c = I2C(0, sda = Pin(16), scl = Pin(17), freq = 400000)
 
 #pins out to LCD display
 rs = machine.Pin(27,machine.Pin.OUT)
@@ -33,7 +35,9 @@ d7 = machine.Pin(19,machine.Pin.OUT)
 sclPin = Pin(17) # serial clock pin
 sdaPin = Pin(16) # serial data pin
 
-history=[] #create empty list for historical readings
+press_history=[]
+
+Error=-4.2
 
 # Initiate I2C 
 i2c_object = I2C(0,              # positional argument - I2C id
@@ -57,11 +61,10 @@ bmp280_object.press_os = BMP280_TEMP_OS_4
 bmp280_object.standby = BMP280_STANDBY_250
 bmp280_object.iir = BMP280_IIR_FILTER_2
 
-#function to find median of a list
-def median(lst):
+def median_11(lst):
     n = len(lst)
     s = sorted(lst)
-    return (sum(s[n//2-1:n//2+1])/2.0, s[n//2])[n % 2] if n else None
+    return s[5] if n==11 else s[0]
 
 
 def pulseE():
@@ -69,12 +72,11 @@ def pulseE():
     utime.sleep_us(40)
     e.value(0)
     utime.sleep_us(40)
-    
 def send2LCD4(BinNum):
-    d4.value((BinNum & 0b00000001))# >>0)
-    d5.value((BinNum & 0b00000010))# >>1)
-    d6.value((BinNum & 0b00000100))# >>2)
-    d7.value((BinNum & 0b00001000))# >>3)
+    d4.value((BinNum & 0b0001))# >>0)
+    d5.value((BinNum & 0b0010))# >>1)
+    d6.value((BinNum & 0b0100))# >>2)
+    d7.value((BinNum & 0b1000))# >>3)
     pulseE()
 def send2LCD8(BinNum):
     d4.value((BinNum & 0b00010000))# >>4)
@@ -99,11 +101,19 @@ def setUpLCD():
     send2LCD8(0b00000001)#clear screen
     utime.sleep_ms(2)#clear screen needs a long delay
 
-deg=0b11011111
+deg=0xdf
 up=0b00010000
 down=0b11011111
 setUpLCD()
 rs.value(1)
+
+
+#half second delay from powering to initial reading to allow sensor to stabilise
+utime.sleep(0.5)
+
+min_press=bmp280_object.pressure*0.01 + Error
+max_press=bmp280_object.pressure*0.01 + Error
+
 while True:
     # accquire temperature value in celcius
     temperature_c = bmp280_object.temperature # degree celcius
@@ -112,53 +122,76 @@ while True:
     # accquire pressure value
     pressure = bmp280_object.pressure  # pascal
     
-
-
-    pressure_hPa = ( pressure * 0.01 ) 
-
-    press = "{:.1f}".format(pressure_hPa) #pressure as a string with 1dp
+    #convert pressure in pascals to mbar and add offset
+    pressure_hPa = ( pressure * 0.01 ) + Error
+    if pressure_hPa > max_press:
+        max_press = pressure_hPa
+        
+    if pressure_hPa < min_press:
+        min_press=pressure_hPa
 
 
     rs.value(0)               #send instruction
     send2LCD8(0b00000010)     #move cursor to start of line 1
     rs.value(1)               #send data
     
-    for x in str(temp):       #print temperature
-        send2LCD8(ord(x))
-    send2LCD8(deg)
-    send2LCD8(ord('C'))
+
 
     dateTime = utime.gmtime(utime.time())
-    for x in ("  {:02d}:{:02d}:{:02d}".format(dateTime[3],dateTime[4],dateTime[5])):
+    for x in ("{:02d}:{:02d}:{:02d}  {:02d}/{:02d}/{:04d}".format(dateTime[3],dateTime[4],dateTime[5],dateTime[2],dateTime[1],dateTime[0])):
         send2LCD8(ord(x))
     
+
+#add every 60th reading to history(~one a minute)    
+
+    if count ==0:
+        press_history.append(pressure_hPa)
+        while len (press_history) > 185: # if list is longer than maximum(~3 hours, 5 minutes), delete oldest value
+            del press_history[0]
+    count+=1
+    if count >= 60:
+        count=0
+    #oldest 11 readings, actually 11 minute history to simplify median calculation
+    ten_min=press_history[:11]
+
+
+    #move to start of line 3 
+    rs.value(0)
+    send2LCD8(0b10010100)
+    rs.value(1)
     
+    for x in 'max: '+'{:.2f}'.format(max_press):
+        send2LCD8(ord(x))
+
+
+        
+    #move to start of line 2
     rs.value(0)
     send2LCD8(0b11000000)
     rs.value(1)
-    
-    
-    
-    
-#     for x in press +" mbar "+str(pressure_hPa-median(ten_min)):
-#         send2LCD8(ord(x))
-    #history.append(pressure_hPa) #add current reading to end of list
-    #history.append(temp) #add current reading to end of list
+    for x in "{:.2f}".format(pressure_hPa) +" mbar "+diff(pressure_hPa, median_11(ten_min))+ ' ' :
+        send2LCD8(ord(x))    
 
 
+
+    #move to start of line 4    
+    rs.value(0)
+    send2LCD8(0b11010100)
+    rs.value(1)
     
+    for x in 'min: '+ '{:.2f}'.format(min_press):#+' max: '+'{:.2f}'.format(max_press):
+        send2LCD8(ord(x))   
 
-    if count ==0:                #when the count is zero, at the start and then every minute, add current reading into history list
-        history.append(pressure_hPa) 
-        while len (history) > 185: # if list is longer than maximum, delete oldest value
-            del history[0]
-    count+=1
-    if count >= 59: #reset counter after ~ 1 minute
-        count=0
-    #print (len(history))
-    #print (history[-1200:])
-    ten_min=history[:10] # a second list containing the oldest 10 readings
-
-    for x in press +" mbar "+diff(pressure_hPa-median(ten_min)): #send current reading and difference between current and median of 10 oldest readings(from 2 hours 55 mins to 3 hours 5 minutes ago)
+        
+    rs.value(0)
+    send2LCD8(0b10100010)
+    rs.value(1)    
+        
+    for x in str(temp):
         send2LCD8(ord(x))
+    send2LCD8(deg)
+    send2LCD8(ord('C'))    
+
+
+    #wait one second before taking further reading and updating display
     utime.sleep(1)
